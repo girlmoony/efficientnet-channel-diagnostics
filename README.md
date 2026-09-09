@@ -4,6 +4,55 @@
 
 ## 两个功能
 
+### v0.2：真实格点与空间验证
+
+每个展示通道新增 `channel_<id>_details.png`，包含：
+
+1. **原始格点数值图**：直接显示实际 Hf×Wf（Lite1 通常 8×8）有符号 contribution，逐格标数，不做平滑。
+2. **nearest 分块图**：保留真实格点结构，不混合原图。
+3. **灰度激活图**：显示实际池化前 feature map，未乘分类权重，与 contribution 区分；使用独立灰度色标。
+4. **热点轮廓**：在模型实际输入上仅画热点边界。B 通道取正贡献，A 通道取负贡献绝对值，不把 A 的负响应丢弃。
+
+`--hot-fraction 0.15` 默认选择同方向严格正贡献格点的前 15%（可设 0.10 或 0.20），通过 quantile 阈值选择，并列值全部保留。因此实际入选比例可能超过请求比例，图中报告真实格点数；均匀响应可能全图入选，不能解释为精确定位。
+
+全部通道的 `spatial_metrics.csv/json` 分别提供 A/B 方向：
+
+- `max_share`：最大格点占该方向贡献总量的比例。
+- `top4_share`：前 4 格点贡献占比。
+- `entropy`：Shannon 熵除以 log(全部格点数)，0 更集中、1 全格点均匀；无贡献时为 null。
+- `positive_area`：严格正贡献格点占全部格点的比例，无额外噪声阈值；这是网格覆盖率，不是像素重要性或物体面积。
+- `hot_grid_fraction`：计入阈值并列值后的实际热点格点比例。
+
+原始激活也保存在 `spatial_contributions.npz` 的 `feature_maps` 中。细节图逐通道使用独立色标（面板有数值/色条），旧的 A/B 通道叠加组图仍共用色标。
+
+### 热区替换对照实验（可选，增加推理次数）
+
+```bash
+efficientnet-diagnose --checkpoint checkpoints/sushi.pth --image data/error.png --true-class 12 --mean 0.5 0.5 0.5 --std 0.5 0.5 0.5 --output reports/case-003 --hot-fraction 0.15 --validate-regions --validation-top-k 3
+```
+
+mean/std 仍需改成实际配置。实验针对总 B−A 空间图和前 3 个推动 B 的通道，A/B 固定为原图真实类/预测类：
+
+- 用 nearest 将热点映射到输入像素，用**不重叠、严格等像素面积**的低贡献区域作对照。
+- 低区在热点外按 `max(B−A贡献,0)` 升序选择，负贡献也视为低 B 证据；并列按行优先，必要时会截断格点以匹配面积。该选择是确定性对照，不是随机试验。
+- 分别使用整张图片每通道均值、局部平均模糊替换热区和低区（模糊核最多 31，实际输入过小时自动缩小）。两种替换在标准逐通道归一化空间进行，等价于 RGB 空间相同线性操作。
+- 输出每次 A/B logits、margin、`margin_drop = 原margin - 新margin`、完整分类器的新 Top-1，以及 `hot_minus_low_drop` 对照差。
+- 没有正热点，或并列值导致热点过大、无法选取等面积不重叠对照时，记录 skipped 原因，不伪造结果。
+
+HTML 中可查看结果表和每次替换后的图片/二值 mask，完整数据在 `interventions.json`。正的 `hot_minus_low_drop` 表示该次热区替换比低区替换更削弱 B；负值同样保留，不自动下“解释有效”结论。均值和模糊一致只是更强证据，仍受替换伪影、感受野和对照选择影响，不证明训练数据中的背景伪相关。
+
+Python API：
+
+```python
+from efficientnet_diagnostics import diagnose, validate_regions, save_report
+result = diagnose(model, x, A_index)
+experiment = validate_regions(model, x, result, fraction=.15, top_k=3)
+save_report(result, input_rgb, "reports/case-004", hot_fraction=.15,
+            intervention=experiment, normalization=(mean, std))
+```
+
+本版本未实现 Integrated Gradients、Grad-CAM/LayerCAM 或更早层归因；这些属于后续交叉验证方法。不能把最后层单通道热图解释为精确物体/像素定位。
+
 1. **通道贡献分布**：导出全部 1280 通道的激活、对 A/B 的贡献、B−A 贡献、同方向占比，以及贡献柱状图。
 2. **对应图片区域**：输出总空间贡献图，以及最推动 B、最支持 A 的通道叠加图。红色推动 B，蓝色支持 A；各通道共用色标。
 

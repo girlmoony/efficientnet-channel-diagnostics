@@ -20,6 +20,7 @@ class Diagnosis:
     bias_margin: float
     input_size: tuple[int, int]
     reconstruction_error: float
+    feature_maps: torch.Tensor
 
 
 @torch.no_grad()
@@ -95,4 +96,5 @@ def diagnose(model: nn.Module, x: torch.Tensor, true_class: int) -> Diagnosis:
         (negative / negative.sum().clamp_min(1e-12)).cpu(), spatial.cpu(),
         float(bias), tuple(x.shape[-2:]),
         float((reconstructed - (logits[b] - logits[a])).abs()),
+        maps[0].cpu(),
     )

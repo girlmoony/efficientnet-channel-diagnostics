@@ -11,6 +11,7 @@ import torch
 
 from .analysis import diagnose
 from .report import save_report
+from .intervention import validate_regions
 
 
 def load_weights(model, path, key=None):
@@ -67,9 +68,14 @@ def main():
     parser.add_argument("--interpolation", choices=["bilinear", "bicubic", "nearest"], default="bilinear")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--top-k", type=int, default=6)
+    parser.add_argument("--hot-fraction", type=float, default=.15)
+    parser.add_argument("--validate-regions", action="store_true", help="Mean/blur hot-vs-low input replacement")
+    parser.add_argument("--validation-top-k", type=int, default=3)
     parser.add_argument("--labels", help="UTF-8 JSON array of labels in training index order")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
+    if not 0 < args.hot_fraction <= 1 or args.validation_top_k < 0:
+        parser.error("hot-fraction must be in (0,1]; validation-top-k must be nonnegative")
     if args.top_k < 1 or args.size < 1 or args.num_classes < 2:
         parser.error("top-k/size must be positive and num-classes at least 2")
     names = None
@@ -82,11 +88,14 @@ def main():
     model = model.float().to(args.device).eval()
     rgb, x = preprocess(args.image, args.size, args.mean, args.std, args.resize, args.interpolation)
     result = diagnose(model, x.to(args.device), args.true_class)
+    intervention = validate_regions(model, x.to(args.device), result,
+        fraction=args.hot_fraction, top_k=args.validation_top_k) if args.validate_regions else None
     metadata = {"model": args.model, "mean": args.mean, "std": args.std,
                 "resize": args.resize, "interpolation": args.interpolation,
                 "torch_version": str(torch.__version__), "timm_version": timm.__version__}
     report = save_report(result, rgb, args.output, top_k=args.top_k,
-                         class_names=names, metadata=metadata)
+                         class_names=names, metadata=metadata, hot_fraction=args.hot_fraction,
+                         intervention=intervention, normalization=(args.mean, args.std))
     print(f"A={result.true_class}, B={result.predicted_class}")
     print(f"Report: {report.resolve()}")
 

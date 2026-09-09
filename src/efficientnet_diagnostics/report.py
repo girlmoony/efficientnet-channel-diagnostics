@@ -13,10 +13,12 @@ import torch
 from PIL import Image
 
 from .analysis import Diagnosis
+from .detail_report import save_details
 
 
 def save_report(result: Diagnosis, input_rgb, output_dir, *, top_k=6,
-                class_names=None, metadata=None):
+                class_names=None, metadata=None, hot_fraction=.15, intervention=None,
+                normalization=None):
     """RGB must match model input geometry, before normalization; no auto-resize.
 
     Use a NEW/empty output directory to avoid mixing reports. Heatmaps use
@@ -24,6 +26,10 @@ def save_report(result: Diagnosis, input_rgb, output_dir, *, top_k=6,
     """
     if top_k < 1:
         raise ValueError("top_k must be positive")
+    if not 0 < hot_fraction <= 1:
+        raise ValueError("hot_fraction must be in (0,1]")
+    if intervention is not None and normalization is None:
+        raise ValueError("Supply normalization=(mean,std) to render intervention images")
     rgb = np.asarray(input_rgb)
     if rgb.dtype == np.uint8:
         rgb = rgb.astype(np.float32) / 255
@@ -63,10 +69,12 @@ def save_report(result: Diagnosis, input_rgb, output_dir, *, top_k=6,
         "input_size": list(result.input_size), "top_push_B": top_b.tolist(),
         "top_push_A": top_a.tolist(), "logits": result.logits.tolist(),
         "metadata": metadata or {},
+        "hot_fraction": hot_fraction,
     }
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     # Original-resolution maps remain available for quantitative analysis.
     np.savez_compressed(out / "spatial_contributions.npz",
+                        feature_maps=result.feature_maps.numpy(),
                         channel_maps=result.channel_maps.numpy(),
                         total_map=result.channel_maps.sum(0).numpy())
 
@@ -121,6 +129,26 @@ def save_report(result: Diagnosis, input_rgb, output_dir, *, top_k=6,
         plt.close(fig)
         images.append(name)
 
+    images += save_details(result, rgb, out, selected, hot_fraction)
+    intervention_html = ""
+    if intervention is not None:
+        data, artifacts = intervention
+        (out / "interventions.json").write_text(json.dumps(data, indent=2, allow_nan=False), encoding="utf-8")
+        mean, std = (np.asarray(v).reshape(1, 1, 3) for v in normalization)
+        for key, (mask, tensor) in artifacts.items():
+            altered = np.clip(tensor.permute(1,2,0).numpy()*std + mean, 0, 1)
+            Image.fromarray((altered*255).round().astype(np.uint8)).save(out / f"{key}.png")
+            Image.fromarray(mask.astype(np.uint8)*255).save(out / f"{key}_mask.png")
+        intervention_html = '<h2>热区与低贡献区域对照</h2><p>A/B 固定为原预测比较对。正的 margin_drop 表示 B−A 降低。正的 hot_minus_low_drop 表示热区替换比对照影响大；单次结果不能证明因果。<a href="interventions.json">完整实验 JSON</a></p>'
+        intervention_html += '<table><tr><th>目标/方法/区域</th><th>面积比例</th><th>B−A</th><th>下降量</th><th>新 Top-1</th></tr>'
+        for row in data["rows"]:
+            if row["status"] == "ok":
+                key = row["artifact"]
+                intervention_html += f'<tr><td><a href="{key}.png">{key}</a> (<a href="{key}_mask.png">mask</a>)</td><td>{row["area_fraction"]:.3f}</td><td>{row["margin"]:.4f}</td><td>{row["margin_drop"]:.4f}</td><td>{row["predicted_class"]}</td></tr>'
+            else:
+                intervention_html += '<tr><td colspan="5">'+html.escape(str(row))+'</td></tr>'
+        intervention_html += '</table>'
+
     def label(index):
         return html.escape(str(class_names[index])) if class_names is not None else str(index)
 
@@ -140,6 +168,7 @@ a{{color:#165ca3}} code{{background:#eee;padding:2px 5px}}</style>
 <p><a href="channels.csv">全部通道 CSV</a> · <a href="summary.json">分数与运行配置 JSON</a> ·
 <a href="spatial_contributions.npz">原始空间贡献 NPZ</a></p>'''
     page += "".join(f'<figure><img src="{name}" alt="{name}"><figcaption>{name}</figcaption></figure>' for name in images)
-    page += "</html>"
+    page += '<p><a href="spatial_metrics.csv">全部通道空间集中度 CSV</a> · <a href="spatial_metrics.json">空间指标 JSON</a></p><p>指标分别对 B 的正贡献和 A 的负贡献绝对值计算。熵按 log(全部格点数) 归一化；没有贡献时比例和熵为 null。覆盖面积为严格正贡献格点比例，不是物体分割面积。细节图使用各通道独立色标，应以数值比较。</p>'
+    page += intervention_html + "</html>"
     (out / "index.html").write_text(page, encoding="utf-8")
     return out / "index.html"
