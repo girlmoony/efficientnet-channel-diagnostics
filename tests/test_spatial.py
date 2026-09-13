@@ -20,19 +20,38 @@ def test_concentration_edge_cases():
     assert nearest(spike, (256,256))[64:96,96:128].min() == 5
 
 
-def test_fixed_pair_equal_area_intervention():
+@pytest.mark.parametrize("true_class,channel", [(0, 0), (1, 1)])
+def test_fixed_pair_equal_area_intervention(true_class, channel):
     model = Toy().eval()
+    with torch.no_grad():
+        model.classifier.bias[1] = -.6  # Replacements can change Top-1.
     x = sample()
-    r = diagnose(model, x, 0)
+    r = diagnose(model, x, true_class)
     data, artifacts = validate_regions(model, x, r, top_k=1)
-    assert (data["A"],data["B"]) == (0,1)
-    hot, _ = artifacts["channel_0_mean_hot"]
-    low, _ = artifacts["channel_0_mean_low"]
+    assert (data["A"],data["B"]) == (true_class, 1-true_class)
+    assert data["predicted_class"] == 1
+    assert data["comparison_class"] == 1-true_class
+    target = f"channel_{channel}"
+    hot, _ = artifacts[f"{target}_mean_hot"]
+    low, _ = artifacts[f"{target}_mean_low"]
     assert hot.sum() == low.sum() == 8
     assert not (hot & low).any()
-    row = next(row for row in data["rows"] if row["status"] == "comparison" and row["target"] == "channel_0" and row["method"] == "mean")
+    row = next(row for row in data["rows"] if row["status"] == "comparison" and row["target"] == target and row["method"] == "mean")
     assert row["hot_minus_low_drop"] > 0
     assert all(row["logit_B"] - row["logit_A"] == pytest.approx(row["margin"]) for row in data["rows"] if row["status"] == "ok")
+    assert any(row["predicted_class"] != r.predicted_class
+               for row in data["rows"] if row["status"] == "ok")
+    for row in data["rows"]:
+        if row["status"] != "ok":
+            continue
+        _, modified = artifacts[row["artifact"]]
+        with torch.no_grad():
+            logits = model(modified[None])[0]
+        assert row["predicted_class"] == int(logits.argmax())
+        assert row["comparison_class"] == r.comparison_class
+        assert row["logit_B"] == float(logits[r.comparison_class])
+        assert row["logit_A"] == float(logits[r.true_class])
+        assert row["margin_drop"] == pytest.approx(data["original_margin"] - row["margin"])
 
 
 def test_uniform_hotspot_skips_control():

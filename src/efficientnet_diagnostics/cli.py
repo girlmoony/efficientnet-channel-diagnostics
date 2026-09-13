@@ -54,7 +54,9 @@ def preprocess(path, size, mean, std, resize, interpolation):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Diagnose A-to-B channel and spatial contributions")
+    parser = argparse.ArgumentParser(description=(
+        "Diagnose channel and spatial contributions for correct and incorrect predictions. "
+        "A is the true class; B is the incorrect Top-1 or the runner-up when correct."))
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--checkpoint-key")
     parser.add_argument("--image", required=True)
@@ -96,7 +98,8 @@ def main():
     report = save_report(result, rgb, args.output, top_k=args.top_k,
                          class_names=names, metadata=metadata, hot_fraction=args.hot_fraction,
                          intervention=intervention, normalization=(args.mean, args.std))
-    print(f"A={result.true_class}, B={result.predicted_class}")
+    print(f"True class A={result.true_class}, predicted_class={result.predicted_class}, "
+          f"comparison_class B={result.comparison_class}")
     print(f"Report: {report.resolve()}")
 
 

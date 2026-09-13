@@ -61,9 +61,10 @@ def save_report(result: Diagnosis, input_rgb, output_dir, *, top_k=6,
                              float(result.share_b[k]), float(result.share_a[k])])
     summary = {
         "true_class": result.true_class, "predicted_class": result.predicted_class,
+        "comparison_class": result.comparison_class,
         "logit_A": float(result.logits[result.true_class]),
-        "logit_B": float(result.logits[result.predicted_class]),
-        "margin_B_minus_A": float(result.logits[result.predicted_class] - result.logits[result.true_class]),
+        "logit_B": float(result.logits[result.comparison_class]),
+        "margin_B_minus_A": float(result.logits[result.comparison_class] - result.logits[result.true_class]),
         "bias_margin": result.bias_margin, "reconstruction_error": result.reconstruction_error,
         "channels": len(d), "feature_map_size": list(result.channel_maps.shape[-2:]),
         "input_size": list(result.input_size), "top_push_B": top_b.tolist(),
@@ -139,8 +140,8 @@ def save_report(result: Diagnosis, input_rgb, output_dir, *, top_k=6,
             altered = np.clip(tensor.permute(1,2,0).numpy()*std + mean, 0, 1)
             Image.fromarray((altered*255).round().astype(np.uint8)).save(out / f"{key}.png")
             Image.fromarray(mask.astype(np.uint8)*255).save(out / f"{key}_mask.png")
-        intervention_html = '<h2>热区与低贡献区域对照</h2><p>A/B 固定为原预测比较对。正的 margin_drop 表示 B−A 降低。正的 hot_minus_low_drop 表示热区替换比对照影响大；单次结果不能证明因果。<a href="interventions.json">完整实验 JSON</a></p>'
-        intervention_html += '<table><tr><th>目标/方法/区域</th><th>面积比例</th><th>B−A</th><th>下降量</th><th>新 Top-1</th></tr>'
+        intervention_html = '<h2>Hot versus low-contribution region controls</h2><p>A (true class) and B (comparison class) remain fixed from the original input, even if Top-1 changes. Positive margin_drop means B-A decreased. Positive hot_minus_low_drop means hotspot replacement reduced B-A more than the control; a single result does not establish causality. <a href="interventions.json">Full experiment JSON</a></p>'
+        intervention_html += '<table><tr><th>Target/method/region</th><th>Area fraction</th><th>B-A</th><th>Margin drop</th><th>New Top-1</th></tr>'
         for row in data["rows"]:
             if row["status"] == "ok":
                 key = row["artifact"]
@@ -152,23 +153,29 @@ def save_report(result: Diagnosis, input_rgb, output_dir, *, top_k=6,
     def label(index):
         return html.escape(str(class_names[index])) if class_names is not None else str(index)
 
-    page = f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+    outcome = "Correct" if result.predicted_class == result.true_class else "Incorrect"
+    comparison_role = "runner-up" if outcome == "Correct" else "incorrect Top-1"
+    page = f'''<!doctype html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>EfficientNet 通道诊断</title><style>
+<title>EfficientNet Channel Diagnostics</title><style>
 body{{font:16px/1.65 system-ui,sans-serif;max-width:1100px;margin:40px auto;padding:0 20px;color:#172338}}
 img{{max-width:100%;height:auto}} .note{{background:#eef3f8;padding:18px;border-radius:8px}}
 a{{color:#165ca3}} code{{background:#eee;padding:2px 5px}}</style>
-<h1>通道贡献与图片区域诊断</h1>
-<p>真实 A：<b>{label(result.true_class)}</b>；预测 B：<b>{label(result.predicted_class)}</b></p>
-<p>B−A logit：{summary['margin_B_minus_A']:.6f}；偏置差：{result.bias_margin:.6f}；
-分解误差：{result.reconstruction_error:.2e}</p>
-<div class="note">红色推动 B，蓝色支持 A。占比在同方向通道内计算，不包含偏置，也不是概率。
-通道图共用色标，总图使用独立色标。原始特征图尺寸 {summary['feature_map_size']}，插值仅用于显示。
-空间位置对应特征响应，不能视为精确的像素因果归因；背景原因需要受控图片干预验证。</div>
-<p><a href="channels.csv">全部通道 CSV</a> · <a href="summary.json">分数与运行配置 JSON</a> ·
-<a href="spatial_contributions.npz">原始空间贡献 NPZ</a></p>'''
+<h1>Channel contributions and spatial diagnostics</h1>
+<p>{outcome} prediction. True class A: <b>{label(result.true_class)}</b>;
+predicted Top-1: <b>{label(result.predicted_class)}</b>;
+comparison class B ({comparison_role}): <b>{label(result.comparison_class)}</b></p>
+<p>B-A logit margin: {summary['margin_B_minus_A']:.6f}; bias difference: {result.bias_margin:.6f};
+reconstruction error: {result.reconstruction_error:.2e}</p>
+<div class="note">Red pushes B; blue supports A. Shares are computed within each direction,
+exclude bias, and are not probabilities. Channel overlays share a color scale; the total map
+uses its own scale. Native feature map size: {summary['feature_map_size']}; interpolation is for display only.
+Spatial positions describe feature responses, not precise pixel-level causal attribution.
+Background explanations require controlled image interventions.</div>
+<p><a href="channels.csv">All channel values (CSV)</a> · <a href="summary.json">Scores and run configuration (JSON)</a> ·
+<a href="spatial_contributions.npz">Native spatial contributions (NPZ)</a></p>'''
     page += "".join(f'<figure><img src="{name}" alt="{name}"><figcaption>{name}</figcaption></figure>' for name in images)
-    page += '<p><a href="spatial_metrics.csv">全部通道空间集中度 CSV</a> · <a href="spatial_metrics.json">空间指标 JSON</a></p><p>指标分别对 B 的正贡献和 A 的负贡献绝对值计算。熵按 log(全部格点数) 归一化；没有贡献时比例和熵为 null。覆盖面积为严格正贡献格点比例，不是物体分割面积。细节图使用各通道独立色标，应以数值比较。</p>'
+    page += '<p><a href="spatial_metrics.csv">All channel spatial concentration (CSV)</a> · <a href="spatial_metrics.json">Spatial metrics (JSON)</a></p><p>Metrics are computed separately for positive B contributions and absolute negative A contributions. Entropy is normalized by log(total grid cells); concentration shares and entropy are null when there is no contribution. Area coverage is the fraction of strictly positive grid cells, not object segmentation area. Detail panels use independent scales for each channel; compare numeric values.</p>'
     page += intervention_html + "</html>"
     (out / "index.html").write_text(page, encoding="utf-8")
     return out / "index.html"

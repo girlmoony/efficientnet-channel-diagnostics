@@ -16,7 +16,7 @@ def validate_regions(model, x, result, *, fraction=.15, top_k=3):
         raise ValueError("Input shape does not match diagnosis")
     original = model(x)[0]
     torch.testing.assert_close(original.cpu(), result.logits, rtol=1e-4, atol=1e-5)
-    a, b = result.true_class, result.predicted_class
+    a, b = result.true_class, result.comparison_class
     baseline = float(original[b] - original[a])
     maps = {"total": result.channel_maps.sum(0).numpy()}
     ids = torch.argsort(result.margin_contribution, descending=True)
@@ -55,9 +55,12 @@ def validate_regions(model, x, result, *, fraction=.15, top_k=3):
                                  pixels=count, area_fraction=count/hot.size,
                                  logit_A=float(logits[a]), logit_B=float(logits[b]),
                                  margin=margin, margin_drop=baseline-margin,
-                                 predicted_class=int(logits.argmax()), artifact=key))
+                                 predicted_class=int(logits.argmax()), comparison_class=b,
+                                 artifact=key))
                 drops[region] = baseline-margin
                 artifacts[key] = (mask, modified[0].cpu())
             rows.append(dict(target=name, status="comparison", method=method,
                              hot_minus_low_drop=drops["hot"]-drops["low"]))
-    return dict(original_margin=baseline, A=a, B=b, fraction=fraction, rows=rows), artifacts
+    return dict(original_margin=baseline, A=a, B=b, true_class=a,
+                predicted_class=result.predicted_class, comparison_class=b,
+                fraction=fraction, rows=rows), artifacts
