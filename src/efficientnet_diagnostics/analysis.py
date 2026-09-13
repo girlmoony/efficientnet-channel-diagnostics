@@ -9,6 +9,7 @@ from torch import nn
 class Diagnosis:
     true_class: int
     predicted_class: int
+    comparison_class: int
     logits: torch.Tensor
     activation: torch.Tensor
     contribution_a: torch.Tensor
@@ -30,6 +31,8 @@ def diagnose(model: nn.Module, x: torch.Tensor, true_class: int) -> Diagnosis:
     Only standard single-image FP32, average-pool + Linear classifiers are
     supported. Validate against the actual forward pass, including head hooks.
     Returned tensors are detached CPU tensors; no gradients are required.
+    A is true_class. B is Top-1 for incorrect predictions, otherwise the
+    highest-logit non-A class. Ties use the lowest class index, as in argmax.
     """
     if any(module.training for module in model.modules()):
         raise ValueError("Call model.eval() before diagnosis (Dropout/BN must be disabled).")
@@ -40,6 +43,8 @@ def diagnose(model: nn.Module, x: torch.Tensor, true_class: int) -> Diagnosis:
     fc = getattr(model, "classifier", None)
     if not isinstance(fc, nn.Linear) or fc.weight.dtype != torch.float32:
         raise ValueError("Expected an FP32 model.classifier Linear layer.")
+    if fc.out_features < 2:
+        raise ValueError("Diagnosis requires at least two classes.")
     a = int(true_class)
     if a != true_class or not 0 <= a < fc.out_features:
         raise ValueError("true_class must be a valid zero-based class index.")
@@ -77,9 +82,12 @@ def diagnose(model: nn.Module, x: torch.Tensor, true_class: int) -> Diagnosis:
         pooled, fc.weight, fc.bias), rtol=1e-4, atol=1e-5)
 
     logits = output[0]
-    b = int(logits.argmax())
-    if a == b:
-        raise ValueError("Prediction equals true_class; no A-to-B misclassification.")
+    predicted = int(logits.argmax())
+    b = predicted
+    if a == predicted:
+        alternatives = logits.clone()
+        alternatives[a] = -torch.inf
+        b = int(alternatives.argmax())
     h = pooled[0]
     ca, cb = h * fc.weight[a], h * fc.weight[b]
     delta = cb - ca
@@ -91,7 +99,7 @@ def diagnose(model: nn.Module, x: torch.Tensor, true_class: int) -> Diagnosis:
     positive, negative = delta.clamp_min(0), (-delta).clamp_min(0)
 
     return Diagnosis(
-        a, b, logits.cpu(), h.cpu(), ca.cpu(), cb.cpu(), delta.cpu(),
+        a, predicted, b, logits.cpu(), h.cpu(), ca.cpu(), cb.cpu(), delta.cpu(),
         (positive / positive.sum().clamp_min(1e-12)).cpu(),
         (negative / negative.sum().clamp_min(1e-12)).cpu(), spatial.cpu(),
         float(bias), tuple(x.shape[-2:]),
