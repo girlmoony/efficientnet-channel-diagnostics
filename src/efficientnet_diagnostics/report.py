@@ -14,16 +14,21 @@ from PIL import Image
 
 from .analysis import Diagnosis
 from .detail_report import save_details
+from .report_language import japanese_page
 
 
 def save_report(result: Diagnosis, input_rgb, output_dir, *, top_k=6,
                 class_names=None, metadata=None, hot_fraction=.15, intervention=None,
-                normalization=None):
+                normalization=None, channel_order="rgb", language="en"):
     """RGB must match model input geometry, before normalization; no auto-resize.
 
     Use a NEW/empty output directory to avoid mixing reports. Heatmaps use
     signed values with constant opacity and a shared channel color scale.
     """
+    if channel_order not in ("rgb", "bgr"):
+        raise ValueError("channel_order must be rgb or bgr")
+    if language not in ("en", "ja"):
+        raise ValueError("language must be en or ja")
     if top_k < 1:
         raise ValueError("top_k must be positive")
     if not 0 < hot_fraction <= 1:
@@ -62,6 +67,7 @@ def save_report(result: Diagnosis, input_rgb, output_dir, *, top_k=6,
     summary = {
         "true_class": result.true_class, "predicted_class": result.predicted_class,
         "comparison_class": result.comparison_class,
+        "contrast_class": result.contrast_class, "is_correct": result.is_correct,
         "logit_A": float(result.logits[result.true_class]),
         "logit_B": float(result.logits[result.comparison_class]),
         "margin_B_minus_A": float(result.logits[result.comparison_class] - result.logits[result.true_class]),
@@ -71,6 +77,7 @@ def save_report(result: Diagnosis, input_rgb, output_dir, *, top_k=6,
         "top_push_A": top_a.tolist(), "logits": result.logits.tolist(),
         "metadata": metadata or {},
         "hot_fraction": hot_fraction,
+        "channel_order": channel_order, "language": language,
     }
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     # Original-resolution maps remain available for quantitative analysis.
@@ -138,6 +145,8 @@ def save_report(result: Diagnosis, input_rgb, output_dir, *, top_k=6,
         mean, std = (np.asarray(v).reshape(1, 1, 3) for v in normalization)
         for key, (mask, tensor) in artifacts.items():
             altered = np.clip(tensor.permute(1,2,0).numpy()*std + mean, 0, 1)
+            if channel_order == "bgr":
+                altered = altered[:, :, ::-1]
             Image.fromarray((altered*255).round().astype(np.uint8)).save(out / f"{key}.png")
             Image.fromarray(mask.astype(np.uint8)*255).save(out / f"{key}_mask.png")
         intervention_html = '<h2>Hot versus low-contribution region controls</h2><p>A (true class) and B (comparison class) remain fixed from the original input, even if Top-1 changes. Positive margin_drop means B-A decreased. Positive hot_minus_low_drop means hotspot replacement reduced B-A more than the control; a single result does not establish causality. <a href="interventions.json">Full experiment JSON</a></p>'
@@ -151,7 +160,9 @@ def save_report(result: Diagnosis, input_rgb, output_dir, *, top_k=6,
         intervention_html += '</table>'
 
     def label(index):
-        return html.escape(str(class_names[index])) if class_names is not None else str(index)
+        if class_names is None:
+            return str(index)
+        return f"{index} ({html.escape(str(class_names[index]))})"
 
     outcome = "Correct" if result.predicted_class == result.true_class else "Incorrect"
     comparison_role = "runner-up" if outcome == "Correct" else "incorrect Top-1"
@@ -177,5 +188,7 @@ Background explanations require controlled image interventions.</div>
     page += "".join(f'<figure><img src="{name}" alt="{name}"><figcaption>{name}</figcaption></figure>' for name in images)
     page += '<p><a href="spatial_metrics.csv">All channel spatial concentration (CSV)</a> · <a href="spatial_metrics.json">Spatial metrics (JSON)</a></p><p>Metrics are computed separately for positive B contributions and absolute negative A contributions. Entropy is normalized by log(total grid cells); concentration shares and entropy are null when there is no contribution. Area coverage is the fraction of strictly positive grid cells, not object segmentation area. Detail panels use independent scales for each channel; compare numeric values.</p>'
     page += intervention_html + "</html>"
+    if language == "ja":
+        page = japanese_page(page)
     (out / "index.html").write_text(page, encoding="utf-8")
     return out / "index.html"

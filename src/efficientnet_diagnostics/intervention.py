@@ -55,7 +55,7 @@ def validate_regions(model, x, result, *, fraction=.15, top_k=3):
                                  pixels=count, area_fraction=count/hot.size,
                                  logit_A=float(logits[a]), logit_B=float(logits[b]),
                                  margin=margin, margin_drop=baseline-margin,
-                                 predicted_class=int(logits.argmax()), comparison_class=b,
+                                 predicted_class=int(logits.argmax()), comparison_class=b, contrast_class=b,
                                  artifact=key))
                 drops[region] = baseline-margin
                 artifacts[key] = (mask, modified[0].cpu())
@@ -63,4 +63,5 @@ def validate_regions(model, x, result, *, fraction=.15, top_k=3):
                              hot_minus_low_drop=drops["hot"]-drops["low"]))
     return dict(original_margin=baseline, A=a, B=b, true_class=a,
                 predicted_class=result.predicted_class, comparison_class=b,
+                contrast_class=b, is_correct=result.is_correct,
                 fraction=fraction, rows=rows), artifacts

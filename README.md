@@ -49,17 +49,37 @@ efficientnet-diagnose --checkpoint checkpoints/sushi.pth --image data/image.png 
 | `--mean`, `--std` | Required three-channel normalization values |
 | `--resize` | `none` requires the exact input size; `stretch` explicitly resizes to a square |
 | `--interpolation` | `bilinear`; also `bicubic` or `nearest`, used only with stretch |
+| `--channel-order` | `rgb`; select `bgr` when original inference keeps OpenCV BGR order |
+| `--language` | `en`; select `ja` for Japanese HTML text (plot labels remain English) |
 | `--device` | `cpu`; `cuda` is supported |
 | `--top-k` | Show 6 channels per direction |
 | `--hot-fraction` | `0.15`; fraction of strictly positive directional grid cells selected by quantile, retaining ties |
 | `--validate-regions` | Enable mean/blur hotspot-versus-control replacements |
 | `--validation-top-k` | `3`; number of B-supporting channels to validate, in addition to the total map |
-| `--labels` | Optional UTF-8 JSON string array in training class order |
+| `--labels` | Optional UTF-8 JSON string array or one label per nonempty line, in training class order |
 | `--output` | Required new/empty report directory to avoid mixing cases |
 
 Checkpoint loading accepts a plain state dictionary, `state_dict` / `model_state_dict` wrappers, and a uniform `module.` prefix. All weights load strictly with `weights_only=True`; serialized full model objects are not loaded and missing weights are not silently ignored.
 
 The CLI does not apply EXIF orientation, center cropping, or alpha compositing. RGB conversion, resizing, and normalization must match original inference. Use the Python API for custom preprocessing, crops, or transparent images.
+
+## Features from the photographed code
+
+The image-version additions are available while keeping the existing API and output keys:
+
+- `Diagnosis.contrast_class` is a read-only alias of `comparison_class`; `is_correct` reports whether Top-1 equals the supplied true class. The dataclass constructor order stays unchanged.
+- Summary and intervention JSON include `contrast_class` and `is_correct` alongside the existing comparison/prediction keys. Successful intervention rows also include the comparison-class alias.
+- `--labels labels.txt` accepts one label per nonempty line as well as the existing JSON format. Label order must match training indices; reports show `index (label)`.
+- `--channel-order bgr` swaps only the model tensor. The displayed input remains RGB, and exported intervention images are converted back to RGB after inverse normalization. Supply mean/std **in model channel order**.
+- `--language ja` selects Japanese HTML; the default English report and English plot labels remain available.
+
+```bash
+efficientnet-diagnose --checkpoint checkpoints/sushi.pth --image data/image.png --true-class 12 --mean 0.5 0.5 0.5 --std 0.5 0.5 0.5 --channel-order bgr --labels labels.txt --language ja --validate-regions --output reports/case-ja
+```
+
+When using the Python API for BGR inputs, pass `channel_order="bgr"` to `save_report` as well as to your preprocessing. Select Japanese HTML with `language="ja"`. These are explicit options; metadata alone does not change rendering.
+
+Channel contributions, direction shares, spatial metrics, hotspots, and hot-versus-low replacements keep their existing calculations. The photographed CPU `arange` masking expression and late class-count check are not adopted: the existing device-safe runner-up selection and early validation remain. Hidden image sections are completed using the existing repository implementation, not transcription placeholders. This update does not yet add before/after model comparison.
 
 ## Python API
 
