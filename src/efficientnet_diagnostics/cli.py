@@ -34,7 +34,9 @@ def load_weights(model, path, key=None):
     model.load_state_dict(state, strict=True)
 
 
-def preprocess(path, size, mean, std, resize, interpolation):
+def preprocess(path, size, mean, std, resize, interpolation, channel_order="rgb"):
+    if channel_order not in ("rgb", "bgr"):
+        raise ValueError("channel_order must be rgb or bgr")
     if not all(np.isfinite(mean)) or not all(np.isfinite(std)) or min(std) <= 0:
         raise ValueError("mean/std must be finite and std must be positive")
     with Image.open(path) as source:
@@ -48,9 +50,25 @@ def preprocess(path, size, mean, std, resize, interpolation):
                    "nearest": Image.Resampling.NEAREST}
         rgb = rgb.resize((size, size), methods[interpolation])
     array = np.asarray(rgb).astype(np.float32) / 255
-    tensor = torch.from_numpy(array.copy()).permute(2, 0, 1)
+    # Keep the displayed image RGB; normalization follows the model's order.
+    model_array = array[:, :, ::-1] if channel_order == "bgr" else array
+    tensor = torch.from_numpy(model_array.copy()).permute(2, 0, 1)
     tensor = (tensor - torch.tensor(mean)[:, None, None]) / torch.tensor(std)[:, None, None]
     return array, tensor.unsqueeze(0)
+
+
+def load_labels(path, num_classes):
+    """Read JSON or one nonempty label per line in training index order."""
+    text = Path(path).read_text(encoding="utf-8")
+    stripped = text.lstrip()
+    names = json.loads(stripped) if stripped.startswith("[") else [
+        line for line in text.splitlines() if line.strip()
+    ]
+    if not isinstance(names, list) or len(names) != num_classes or not all(
+        isinstance(name, str) for name in names
+    ):
+        raise ValueError("labels must be a JSON array or a text file with num-classes lines")
+    return names
 
 
 def main():
@@ -68,12 +86,15 @@ def main():
     parser.add_argument("--std", type=float, nargs=3, required=True)
     parser.add_argument("--resize", choices=["none", "stretch"], default="none")
     parser.add_argument("--interpolation", choices=["bilinear", "bicubic", "nearest"], default="bilinear")
+    parser.add_argument("--channel-order", choices=["rgb", "bgr"], default="rgb",
+                        help="Model pixel order; use bgr for cv2.imread pipelines without RGB conversion")
+    parser.add_argument("--language", choices=["en", "ja"], default="en", help="HTML report language")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--top-k", type=int, default=6)
     parser.add_argument("--hot-fraction", type=float, default=.15)
     parser.add_argument("--validate-regions", action="store_true", help="Mean/blur hot-vs-low input replacement")
     parser.add_argument("--validation-top-k", type=int, default=3)
-    parser.add_argument("--labels", help="UTF-8 JSON array of labels in training index order")
+    parser.add_argument("--labels", help="UTF-8 JSON array or one label per line, in training index order")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     if not 0 < args.hot_fraction <= 1 or args.validation_top_k < 0:
@@ -82,24 +103,30 @@ def main():
         parser.error("top-k/size must be positive and num-classes at least 2")
     names = None
     if args.labels:
-        names = json.loads(Path(args.labels).read_text(encoding="utf-8"))
-        if not isinstance(names, list) or len(names) != args.num_classes or not all(isinstance(n, str) for n in names):
-            parser.error("labels must be a JSON array with num-classes strings")
+        try:
+            names = load_labels(args.labels, args.num_classes)
+        except (ValueError, OSError) as exc:
+            parser.error(str(exc))
     model = timm.create_model(args.model, pretrained=False, num_classes=args.num_classes)
     load_weights(model, args.checkpoint, args.checkpoint_key)
     model = model.float().to(args.device).eval()
-    rgb, x = preprocess(args.image, args.size, args.mean, args.std, args.resize, args.interpolation)
+    rgb, x = preprocess(args.image, args.size, args.mean, args.std, args.resize, args.interpolation,
+                        args.channel_order)
     result = diagnose(model, x.to(args.device), args.true_class)
     intervention = validate_regions(model, x.to(args.device), result,
         fraction=args.hot_fraction, top_k=args.validation_top_k) if args.validate_regions else None
     metadata = {"model": args.model, "mean": args.mean, "std": args.std,
                 "resize": args.resize, "interpolation": args.interpolation,
+                "channel_order": args.channel_order, "language": args.language,
                 "torch_version": str(torch.__version__), "timm_version": timm.__version__}
     report = save_report(result, rgb, args.output, top_k=args.top_k,
                          class_names=names, metadata=metadata, hot_fraction=args.hot_fraction,
-                         intervention=intervention, normalization=(args.mean, args.std))
+                         intervention=intervention, normalization=(args.mean, args.std),
+                         channel_order=args.channel_order, language=args.language)
     print(f"True class A={result.true_class}, predicted_class={result.predicted_class}, "
           f"comparison_class B={result.comparison_class}")
+    print(f"A={result.true_class}, predicted={result.predicted_class} "
+          f"({'correct' if result.is_correct else 'misclassified'}), contrast B={result.contrast_class}")
     print(f"Report: {report.resolve()}")
 
 

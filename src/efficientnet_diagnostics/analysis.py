@@ -23,6 +23,15 @@ class Diagnosis:
     reconstruction_error: float
     feature_maps: torch.Tensor
 
+    @property
+    def contrast_class(self) -> int:
+        """Image-version name for comparison_class, preserving constructor order."""
+        return self.comparison_class
+
+    @property
+    def is_correct(self) -> bool:
+        return self.predicted_class == self.true_class
+
 
 @torch.no_grad()
 def diagnose(model: nn.Module, x: torch.Tensor, true_class: int) -> Diagnosis:
